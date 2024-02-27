@@ -1,69 +1,96 @@
+import joblib
+import os
 from typing import List, Tuple, Optional, Dict, Any
 from sklearn.base import BaseEstimator
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.model_selection import KFold, learning_curve
+from sklearn.model_selection import KFold, learning_curve, GridSearchCV
 from sklearn.metrics import mean_absolute_error, median_absolute_error
 import pandas as pd
 
 ModelListType = List[Tuple[str, BaseEstimator]]
 
 
+class GridSearchEvaluator:
+    def __init__(self, models, param_grid, cv_folds=10, random_state=None):
+        self.validate_models_with_grid(models, param_grid)  # Static method call for validation
+        self.models = models
+        self.param_grid = param_grid  # Store the parameter grid
+        self.cv_folds = cv_folds
+        self.random_state = random_state
+        self.gs_results = {}
+        self.results = {}
+        self.names = [name for name, _ in models]
+        self.errors = {}
+
+    @staticmethod
+    def validate_models_with_grid(models, param_grid):
+        missing_grids = [name for name, _ in models if name not in param_grid]
+        if missing_grids:
+            raise ValueError(f"No parameter grid provided for models: {', '.join(missing_grids)}")
+
+    def gridsearch_train(self,
+                         X: pd.DataFrame, # noqa
+                         y: pd.Series,
+                         scoring: str = 'neg_mean_squared_error',
+                         verbose: bool = True,
+                         n_jobs: int = -1) -> None:
+        for name, model in self.models:
+            print(f"Evaluating {name} with GridSearchCV")
+            grid_search = GridSearchCV(estimator=model,
+                                       param_grid=self.param_grid[name],
+                                       scoring=scoring,
+                                       n_jobs=n_jobs,
+                                       cv=self.cv_folds,
+                                       verbose=int(verbose))  # Convert verbose to int for sklearn compatibility
+
+            grid_search.fit(X, y)
+            best_score = grid_search.best_score_
+            best_params = grid_search.best_params_
+
+            self.gs_results[name] = {
+                'Best Score': best_score,
+                'Best Parameters': best_params
+            }
+
+
 class ModelEvaluator:
-    """
-    Example:
-        # Define models
-        models = [
-            ('LR', LinearRegression()),
-            ('Ridge', Ridge()),
-            ('RF', RandomForestRegressor()),
-            ('SVR', SVR())
-        ]
-        # Initialize the evaluator
-        evaluator = ModelEvaluator(models, cv_folds=10, random_state=42)
-
-        # Train on training data and return evaluation
-        evaluator.evaluate(X_train, y_train)
-
-        # Plot model performance
-        evaluator.plot_comparison()
-
-        # Validation and plotting of the evaluation
-        evaluator.evaluate_validation_set(X_val, y_val)
-
-        # Plot the learning curves of the trained models
-        evaluator.plot_learning_curves(X_train, y_train, scoring='neg_mean_absolute_error')
-
-    """
     def __init__(self,
-                 models: ModelListType,
+                 models: ModelListType,  # noqa
                  cv_folds: int = 10,
-                 random_state:
-                 Optional[int] = None):
+                 random_state: Optional[int] = None):
         """
-        Initializes the ModelEvaluator class.
+        Initializes the ModelEvaluator class with a set of models, the number of folds for cross-validation,
+        and an optional random state for reproducibility.
 
         Parameters:
             models (ModelListType): A list of tuples, each containing a string (model name) and a model instance (BaseEstimator).
-            cv_folds (int, optional): The number of folds for cross-validation. Defaults to 10.
-            random_state (Optional[int], optional): An optional random state for reproducibility. Defaults to None.
+            cv_folds (int): The number of folds for cross-validation. Defaults to 10.
+            random_state (Optional[int]): An optional random state for reproducibility. Defaults to None.
         """
         self.models = models
         self.cv_folds = cv_folds
         self.random_state = random_state
+        self.gs_results = {}
         self.results = {}
-        self.names = []
+        self.names = [name for name, _ in models]  # Initialize model names list
         self.errors = {}  # To store raw errors for boxplot
+        self.model_paths = {} # Dictionary to store paths of saved models
 
-    def evaluate(self,
-                 X: pd.DataFrame, # noqa
-                 y: pd.Series) -> None:
+    def train_models(self,
+                    X: pd.DataFrame,  # noqa
+                    y: pd.Series,
+                    verbose: bool = False,
+                    plot_comparison: bool = False) -> None:
         """
-        Evaluates the performance of each model on the provided dataset using K-Fold cross-validation.
+        Evaluates the performance of each model on the provided dataset using K-Fold cross-validation,
+        and optionally plots a comparison of their error distributions.
 
         Parameters:
             X (pd.DataFrame): The input features to train the model.
             y (pd.Series): The target values for the training data.
+            verbose (bool): If True, prints summary statistics for each model. Defaults to False.
+            plot_comparison (bool): If True, plots the error distributions for each model. Defaults to False.
         """
 
         for name, model in self.models:
@@ -97,22 +124,33 @@ class ModelEvaluator:
                 'MAE (%)': mae_percent, 'Median AE (%)': median_ae_percent
             }
             self.errors[name] = fold_errors  # Store errors for boxplot
-            self.names.append(name)
 
             # Print summary statistics
-            msg = (f"{name} - MAE: {overall_mae:.2f} ({mae_percent:.2f}%), "
-                   f"Median AE: {overall_median_ae:.2f} ({median_ae_percent:.2f}%)")
-            print(msg)
+            if verbose:
+                msg = (f"{name} - MAE: {overall_mae:.2f} ({mae_percent:.2f}%), "
+                       f"Median AE: {overall_median_ae:.2f} ({median_ae_percent:.2f}%)")
+                print(msg)
+
+            self.save_model(model, name)
+
+        # Plot the error distribution for the validation set
+        if plot_comparison:
+            self.plot_comparison()
 
     def plot_comparison(self) -> None:
         """
         Plots a boxplot comparison of the error distributions for each model evaluated by the `evaluate` method.
+        Ensures that only models with recorded errors are included in the plot.
         """
 
-        data_to_plot = [self.errors[name] for name in self.names]
+        # Filter names to include only those with recorded errors
+        valid_names = [name for name in self.names if name in self.errors]
+
+        # Prepare data for models with recorded errors
+        data_to_plot = [self.errors[name] for name in valid_names]
 
         fig, ax = plt.subplots(figsize=(12, 8))
-        ax.boxplot(data_to_plot, labels=self.names, showmeans=True)
+        ax.boxplot(data_to_plot, labels=valid_names, showmeans=True)
 
         ax.set_title('Model Error Distribution Comparison')
         ax.set_xlabel('Model')
@@ -121,15 +159,19 @@ class ModelEvaluator:
         plt.grid(True)
         plt.show()
 
-    def evaluate_validation_set(self,
-                                X_val: pd.DataFrame, # noqa
-                                y_val: pd.Series) -> None:
+    def evaluate_validation(self,
+                                X_val: pd.DataFrame,  # noqa
+                                y_val: pd.Series,
+                                verbose: bool = False,
+                                plot_comparison: bool = False) -> None:
         """
-        Evaluates the models on a separate validation set and prints the MAE and Median AE.
+        Evaluates the models on a separate validation set and optionally plots a comparison of their error distributions.
 
         Parameters:
             X_val (pd.DataFrame): The input features of the validation set.
             y_val (pd.Series): The target values of the validation set.
+            verbose (bool): If True, prints model results; otherwise, remains silent. Defaults to False.
+            plot_comparison (bool): If True, plots the boxplot comparison between models; otherwise, does not plot. Defaults to False.
         """
 
         validation_results = {}
@@ -153,12 +195,14 @@ class ModelEvaluator:
             }
 
             # Print results
-            msg = (f"{name} - Validation MAE: {mae:.2f} ({mae_percent:.2f}%), "
-                   f"Validation Median AE: {median_ae:.2f} ({median_ae_percent:.2f}%)")
-            print(msg)
+            if verbose:
+                msg = (f"{name} - Validation MAE: {mae:.2f} ({mae_percent:.2f}%), "
+                       f"Validation Median AE: {median_ae:.2f} ({median_ae_percent:.2f}%)")
+                print(msg)
 
         # Plot the error distribution for the validation set
-        self.plot_validation_comparison(validation_errors)
+        if plot_comparison:
+            self.plot_validation_comparison(validation_errors)
 
     def plot_validation_comparison(self, validation_errors: Dict[str, np.ndarray]) -> None:
         """
@@ -180,7 +224,7 @@ class ModelEvaluator:
         plt.show()
 
     def plot_learning_curves(self,
-                             X: pd.DataFrame, # noqa
+                             X: pd.DataFrame,  # noqa
                              y: pd.Series,
                              train_sizes: np.ndarray = np.linspace(0.1, 1.0, 5),
                              scoring: str = 'neg_mean_absolute_error') -> None:
@@ -231,3 +275,20 @@ class ModelEvaluator:
             plt.legend(loc="best")
             plt.grid(True)
             plt.show()
+
+    def save_model(self, model, model_name: str, directory: str = "saved_models") -> None:
+        """Saves the model to a specified directory."""
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        path = os.path.join(directory, model_name + ".joblib")
+        joblib.dump(model, path)
+        self.model_paths[model_name] = path
+        print(f"Model saved to {path}")
+
+    def load_model(self, model_name: str) -> None:
+        """Loads a model from the disk."""
+        path = self.model_paths.get(model_name, None)
+        if path and os.path.exists(path):
+            return joblib.load(path)
+        else:
+            print(f"No saved model found for {model_name}.")
