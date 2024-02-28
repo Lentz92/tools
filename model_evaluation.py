@@ -1,5 +1,5 @@
 import os
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 
 import hiplot as hip
 import joblib
@@ -14,7 +14,31 @@ ModelListType = List[Tuple[str, BaseEstimator]]
 
 
 class GridSearchEvaluator:
-    def __init__(self, models, param_grid, cv_folds=10, random_state=None):
+    """
+    A class for evaluating and comparing multiple scikit-learn models using GridSearchCV
+    for hyperparameter tuning and visualizing the results with HiPlot.
+
+    Attributes:
+        models (List[Tuple[str, Any]]): A list of tuples where each tuple contains a model name and its instance.
+        param_grid (Dict[str, Dict[str, List[Any]]]): A dictionary mapping model names to their hyperparameter search space.
+        cv_folds (int): The number of cross-validation folds to use for GridSearchCV.
+        random_state (Optional[int]): An optional random state for reproducibility.
+        results (Dict[str, Dict[str, Any]]): A dictionary to store the results of GridSearchCV for each model.
+    """
+    def __init__(self,
+                 models: ModelListType,
+                 param_grid: Dict[str, Dict[str, List[Any]]],
+                 cv_folds: int = 10,
+                 random_state: Optional[int] = None):
+        """
+        Initializes the GridSearchEvaluator with models, their parameter grid, and other configurations.
+
+        Args:
+            models (List[Tuple[str, Any]]): A list of tuples containing model names and their instances.
+            param_grid (Dict[str, Dict[str, List[Any]]]): A dictionary mapping model names to their hyperparameter grids.
+            cv_folds (int, optional): The number of folds for cross-validation. Defaults to 10.
+            random_state (Optional[int], optional): A seed for random number generation for reproducibility. Defaults to None.
+        """
         self.validate_models_with_grid(models, param_grid)
         self.models = models
         self.param_grid = param_grid
@@ -23,12 +47,38 @@ class GridSearchEvaluator:
         self.results = {}
 
     @staticmethod
-    def validate_models_with_grid(models, param_grid):
+    def validate_models_with_grid(models: ModelListType, param_grid: Dict[str, Dict[str, List[Any]]]):
+        """
+        Validates that each model has a corresponding parameter grid defined.
+
+        Args:
+            models (List[Tuple[str, Any]]): The list of models to validate.
+            param_grid (Dict[str, Dict[str, List[Any]]]): The parameter grid to validate against.
+
+        Raises:
+            ValueError: If any model does not have a corresponding parameter grid defined.
+        """
+
         missing_grids = [name for name, _ in models if name not in param_grid]
         if missing_grids:
             raise ValueError(f"No parameter grid provided for models: {', '.join(missing_grids)}")
 
-    def gridsearch_train(self, X, y, scoring='neg_mean_squared_error', verbose=True, n_jobs=-1):
+    def gridsearch_train(self,
+                         X: pd.DataFrame, # noqa
+                         y: pd.Series,
+                         scoring: str = 'neg_mean_squared_error',
+                         verbose: bool = True,
+                         n_jobs: int = -1) -> None:
+        """
+        Performs GridSearchCV for each model using the provided dataset and hyperparameters.
+
+        Args:
+            X (DataFrame): The input features.
+            y (Series): The target variable.
+            scoring (str, optional): The scoring metric to use for evaluation. Defaults to 'neg_mean_squared_error'.
+            verbose (bool, optional): Whether to print verbose messages during training. Defaults to True.
+            n_jobs (int, optional): The number of jobs to run in parallel. Defaults to -1 (use all processors).
+        """
         for name, model in self.models:
             print(f"Evaluating {name} with GridSearchCV")
             grid_search = GridSearchCV(estimator=model,
@@ -44,7 +94,16 @@ class GridSearchEvaluator:
                 'cv_results': grid_search.cv_results_
             }
 
-    def hiplot_results(self, model_name):
+    def hiplot_results(self, model_name: str) -> Optional[str]:
+        """
+        Visualizes the GridSearchCV results for a specific model using HiPlot.
+
+        Args:
+            model_name (str): The name of the model to visualize the results for.
+
+        Returns:
+            Optional[str]: A message indicating the status of the visualization process.
+        """
         if model_name not in self.param_grid or not self.param_grid[model_name]:
             return f"There were no hyperparameters to tune for {model_name}, so no plot can be generated."
 
@@ -64,6 +123,36 @@ class GridSearchEvaluator:
 
 
 class ModelEvaluator:
+    """
+    A comprehensive model evaluation class designed for assessing and comparing the performance of multiple
+    machine learning models. It leverages cross-validation to estimate model performance and supports functionalities
+    for training models, evaluating them on a validation set, plotting error distributions and learning curves, and
+    saving/loading models. This class aims to provide a streamlined workflow for model selection and evaluation.
+
+    Parameters:
+    - models (ModelListType): A list of tuples, each containing a string (model name) and a model instance
+      (BaseEstimator) that adheres to the scikit-learn estimator interface.
+    - cv_folds (int): The number of folds for cross-validation to evaluate model performance. Default is 10.
+    - random_state (Optional[int]): An optional random state for reproducibility of results. Default is None.
+
+    Attributes:
+    - models (List[Tuple[str, Any]]): Stores the list of model names and their instances.
+    - cv_folds (int): Number of cross-validation folds.
+    - random_state (Optional[int]): Seed for random number generation..
+    - results (Dict): Dictionary to store evaluation metrics for each model.
+    - names (List[str]): List of model names for easy reference.
+    - errors (Dict): Dictionary to store raw error values for error distribution plots.
+    - model_paths (Dict): Dictionary to store file paths of saved models.
+
+    Methods:
+    - train_models: Trains each model using K-Fold cross-validation and stores performance metrics.
+    - plot_comparison: Plots a comparison of error distributions across all models.
+    - evaluate_validation: Evaluates the models on a separate validation dataset.
+    - plot_validation_comparison: Plots a comparison of validation error distributions across all models.
+    - plot_learning_curves: Generates learning curves for each model to visualize performance over varying data sizes.
+    - save_model: Saves a trained model to disk.
+    - load_model: Loads a saved model from disk.
+    """
     def __init__(self,
                  models: ModelListType,  # noqa
                  cv_folds: int = 10,
@@ -80,7 +169,6 @@ class ModelEvaluator:
         self.models = models
         self.cv_folds = cv_folds
         self.random_state = random_state
-        self.gs_results = {}
         self.results = {}
         self.names = [name for name, _ in models]  # Initialize model names list
         self.errors = {}  # To store raw errors for boxplot
