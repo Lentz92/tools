@@ -1,27 +1,26 @@
-import joblib
 import os
-from typing import List, Tuple, Optional, Dict, Any
-from sklearn.base import BaseEstimator
+from typing import List, Tuple, Optional, Dict
+
+import hiplot as hip
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.model_selection import KFold, learning_curve, GridSearchCV
-from sklearn.metrics import mean_absolute_error, median_absolute_error
 import pandas as pd
+from sklearn.base import BaseEstimator
+from sklearn.metrics import mean_absolute_error, median_absolute_error
+from sklearn.model_selection import KFold, learning_curve, GridSearchCV
 
 ModelListType = List[Tuple[str, BaseEstimator]]
 
 
 class GridSearchEvaluator:
     def __init__(self, models, param_grid, cv_folds=10, random_state=None):
-        self.validate_models_with_grid(models, param_grid)  # Static method call for validation
+        self.validate_models_with_grid(models, param_grid)
         self.models = models
-        self.param_grid = param_grid  # Store the parameter grid
+        self.param_grid = param_grid
         self.cv_folds = cv_folds
         self.random_state = random_state
-        self.gs_results = {}
         self.results = {}
-        self.names = [name for name, _ in models]
-        self.errors = {}
 
     @staticmethod
     def validate_models_with_grid(models, param_grid):
@@ -29,12 +28,7 @@ class GridSearchEvaluator:
         if missing_grids:
             raise ValueError(f"No parameter grid provided for models: {', '.join(missing_grids)}")
 
-    def gridsearch_train(self,
-                         X: pd.DataFrame, # noqa
-                         y: pd.Series,
-                         scoring: str = 'neg_mean_squared_error',
-                         verbose: bool = True,
-                         n_jobs: int = -1) -> None:
+    def gridsearch_train(self, X, y, scoring='neg_mean_squared_error', verbose=True, n_jobs=-1):
         for name, model in self.models:
             print(f"Evaluating {name} with GridSearchCV")
             grid_search = GridSearchCV(estimator=model,
@@ -42,16 +36,31 @@ class GridSearchEvaluator:
                                        scoring=scoring,
                                        n_jobs=n_jobs,
                                        cv=self.cv_folds,
-                                       verbose=int(verbose))  # Convert verbose to int for sklearn compatibility
-
+                                       verbose=int(verbose))
             grid_search.fit(X, y)
-            best_score = grid_search.best_score_
-            best_params = grid_search.best_params_
-
-            self.gs_results[name] = {
-                'Best Score': best_score,
-                'Best Parameters': best_params
+            self.results[name] = {
+                'best_score': grid_search.best_score_,
+                'best_parameters': grid_search.best_params_,
+                'cv_results': grid_search.cv_results_
             }
+
+    def hiplot_results(self, model_name):
+        if model_name not in self.param_grid or not self.param_grid[model_name]:
+            return f"There were no hyperparameters to tune for {model_name}, so no plot can be generated."
+
+        data_for_hiplot = []
+        cv_results = self.results[model_name]['cv_results']
+        for i in range(len(cv_results['params'])):
+            row = {'model': model_name}
+            row.update(cv_results['params'][i])
+            row['mean_test_score'] = cv_results['mean_test_score'][i]
+            data_for_hiplot.append(row)
+
+        if not data_for_hiplot:
+            return f"No results to plot for {model_name}."
+
+        exp = hip.Experiment.from_iterable(data_for_hiplot)
+        exp.display()
 
 
 class ModelEvaluator:
@@ -75,13 +84,13 @@ class ModelEvaluator:
         self.results = {}
         self.names = [name for name, _ in models]  # Initialize model names list
         self.errors = {}  # To store raw errors for boxplot
-        self.model_paths = {} # Dictionary to store paths of saved models
+        self.model_paths = {}  # Dictionary to store paths of saved models
 
     def train_models(self,
-                    X: pd.DataFrame,  # noqa
-                    y: pd.Series,
-                    verbose: bool = False,
-                    plot_comparison: bool = False) -> None:
+                     X: pd.DataFrame,  # noqa
+                     y: pd.Series,
+                     verbose: bool = False,
+                     plot_comparison: bool = False) -> None:
         """
         Evaluates the performance of each model on the provided dataset using K-Fold cross-validation,
         and optionally plots a comparison of their error distributions.
@@ -160,10 +169,10 @@ class ModelEvaluator:
         plt.show()
 
     def evaluate_validation(self,
-                                X_val: pd.DataFrame,  # noqa
-                                y_val: pd.Series,
-                                verbose: bool = False,
-                                plot_comparison: bool = False) -> None:
+                            X_val: pd.DataFrame,  # noqa
+                            y_val: pd.Series,
+                            verbose: bool = False,
+                            plot_comparison: bool = False) -> None:
         """
         Evaluates the models on a separate validation set and optionally plots a comparison of their error distributions.
 
