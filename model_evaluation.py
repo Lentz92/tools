@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
-from sklearn.metrics import mean_absolute_error, median_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, make_scorer
 from sklearn.model_selection import KFold, learning_curve, GridSearchCV
 
 ModelListType = List[Tuple[str, BaseEstimator]]
@@ -25,6 +25,7 @@ class GridSearchEvaluator:
         random_state (Optional[int]): An optional random state for reproducibility.
         results (Dict[str, Dict[str, Any]]): A dictionary to store the results of GridSearchCV for each model.
     """
+
     def __init__(self,
                  models: ModelListType,
                  param_grid: Dict[str, Dict[str, List[Any]]],
@@ -39,7 +40,7 @@ class GridSearchEvaluator:
             cv_folds (int, optional): The number of folds for cross-validation. Defaults to 10.
             random_state (Optional[int], optional): A seed for random number generation for reproducibility. Defaults to None.
         """
-        self.validate_models_with_grid(models, param_grid)
+        self._validate_models_with_grid(models, param_grid)
         self.models = models
         self.param_grid = param_grid
         self.cv_folds = cv_folds
@@ -47,7 +48,7 @@ class GridSearchEvaluator:
         self.results = {}
 
     @staticmethod
-    def validate_models_with_grid(models: ModelListType, param_grid: Dict[str, Dict[str, List[Any]]]):
+    def _validate_models_with_grid(models: ModelListType, param_grid: Dict[str, Dict[str, List[Any]]]):
         """
         Validates that each model has a corresponding parameter grid defined.
 
@@ -63,10 +64,27 @@ class GridSearchEvaluator:
         if missing_grids:
             raise ValueError(f"No parameter grid provided for models: {', '.join(missing_grids)}")
 
+    @staticmethod
+    def _quartic_error_score(y_true, y_pred):
+        """
+        Custom scoring function that penalizes prediction errors by raising them to the power of 4.
+        This emphasizes penalizing larger errors more severely than smaller ones, acting as a severe error penalization score.
+
+        Args:
+            y_true (array-like): True labels.
+            y_pred (array-like): Predicted labels.
+
+        Returns:
+            float: The mean of the penalized errors.
+        """
+        errors = np.abs(y_pred - y_true)
+        penalized_error = np.mean(errors ** 4)
+        return penalized_error
+
     def gridsearch_train(self,
-                         X: pd.DataFrame, # noqa
+                         X: pd.DataFrame,  # noqa
                          y: pd.Series,
-                         scoring: str = 'neg_mean_squared_error',
+                         scoring: str = None,
                          verbose: bool = True,
                          n_jobs: int = -1) -> None:
         """
@@ -75,10 +93,13 @@ class GridSearchEvaluator:
         Args:
             X (DataFrame): The input features.
             y (Series): The target variable.
-            scoring (str, optional): The scoring metric to use for evaluation. Defaults to 'neg_mean_squared_error'.
+            scoring (str, optional): The scoring metric to use for evaluation. Defaults to a quartic error score to penalize outliers.
             verbose (bool, optional): Whether to print verbose messages during training. Defaults to True.
             n_jobs (int, optional): The number of jobs to run in parallel. Defaults to -1 (use all processors).
         """
+        if scoring is None:
+            scoring = make_scorer(self._quartic_error_score, greater_is_better=False)
+
         for name, model in self.models:
             print(f"Evaluating {name} with GridSearchCV")
             grid_search = GridSearchCV(estimator=model,
@@ -153,6 +174,7 @@ class ModelEvaluator:
     - save_model: Saves a trained model to disk.
     - load_model: Loads a saved model from disk.
     """
+
     def __init__(self,
                  models: ModelListType,  # noqa
                  cv_folds: int = 10,
@@ -173,6 +195,8 @@ class ModelEvaluator:
         self.names = [name for name, _ in models]  # Initialize model names list
         self.errors = {}  # To store raw errors for boxplot
         self.model_paths = {}  # Dictionary to store paths of saved models
+        self.detailed_train_results = {}  # To store training details
+        self.detailed_validation_results = {}  # To store validation details
 
     def train_models(self,
                      X: pd.DataFrame,  # noqa
@@ -193,8 +217,9 @@ class ModelEvaluator:
         for name, model in self.models:
             kfold = KFold(n_splits=self.cv_folds, random_state=self.random_state, shuffle=True)
             fold_errors = []  # To store errors for boxplot
-            mae_values = []
-            median_ae_values = []
+            rmse_values = []
+            mape_values = []
+            model_results = []
 
             for train_index, test_index in kfold.split(X):
                 X_train, X_test = X.iloc[train_index], X.iloc[test_index]
@@ -206,29 +231,38 @@ class ModelEvaluator:
                 errors = predictions - y_test
                 fold_errors.extend(errors)  # Store raw errors for boxplot
 
-                # Store MAE and Median AE for each fold
-                mae_values.append(mean_absolute_error(y_test, predictions))
-                median_ae_values.append(median_absolute_error(y_test, predictions))
+                fold_results = pd.DataFrame({
+                    'ID': X_test.index,
+                    'Truth': y_test,
+                    'Predicted': predictions,
+                    'Error': errors
+                })
+                model_results.append(fold_results)
 
-            # Calculate and store overall MAE, Median AE, and their percentages
-            overall_mae = np.mean(mae_values)
-            overall_median_ae = np.median(median_ae_values)
-            mae_percent = overall_mae / np.mean(y) * 100
-            median_ae_percent = overall_median_ae / np.mean(y) * 100
+                # Calculate RMSE and MAPE for each fold
+                rmse_values.append(np.sqrt(mean_squared_error(y_test, predictions)))
+                mape_values.append(mean_absolute_percentage_error(y_test, predictions) * 100)
+
+            # Aggregate fold results and store in the class
+            concatenated_results = pd.concat(model_results, ignore_index=True)
+            self.detailed_train_results[name] = concatenated_results
+
+            # Calculate and store overall RMSE and MAPE
+            overall_rmse = np.mean(rmse_values)
+            overall_mape = np.mean(mape_values)
 
             self.results[name] = {
-                'MAE': overall_mae, 'Median AE': overall_median_ae,
-                'MAE (%)': mae_percent, 'Median AE (%)': median_ae_percent
+                'RMSE': overall_rmse, 'MAPE (%)': overall_mape
             }
             self.errors[name] = fold_errors  # Store errors for boxplot
 
             # Print summary statistics
             if verbose:
-                msg = (f"{name} - MAE: {overall_mae:.2f} ({mae_percent:.2f}%), "
-                       f"Median AE: {overall_median_ae:.2f} ({median_ae_percent:.2f}%)")
+                msg = (f"{name} - RMSE: {overall_rmse:.2f}, "
+                       f"MAPE: {overall_mape:.2f}%")
                 print(msg)
 
-            self.save_model(model, name)
+            self.save_model(model, name)  # Assuming you have a save_model method
 
         # Plot the error distribution for the validation set
         if plot_comparison:
@@ -276,25 +310,29 @@ class ModelEvaluator:
 
         for name, model in self.models:
             predictions = model.predict(X_val)
-
-            # Calculate errors
             errors = predictions - y_val
-            mae = mean_absolute_error(y_val, predictions)
-            median_ae = median_absolute_error(y_val, predictions)
-            mae_percent = mae / np.mean(y_val) * 100
-            median_ae_percent = median_ae / np.mean(y_val) * 100
+
+            model_results = pd.DataFrame({
+                'ID': X_val.index,
+                'Truth': y_val,
+                'Predicted': predictions,
+                'Error': errors
+            })
+            self.detailed_validation_results[name] = model_results
+
+            rmse = np.sqrt(mean_squared_error(y_val, predictions))
+            mape = mean_absolute_percentage_error(y_val, predictions) * 100
             validation_errors[name] = errors  # Store raw errors for boxplot
 
             # Store results
             validation_results[name] = {
-                'MAE': mae, 'Median AE': median_ae,
-                'MAE (%)': mae_percent, 'Median AE (%)': median_ae_percent
+                'RMSE': rmse, 'MAPE (%)': mape
             }
 
             # Print results
             if verbose:
-                msg = (f"{name} - Validation MAE: {mae:.2f} ({mae_percent:.2f}%), "
-                       f"Validation Median AE: {median_ae:.2f} ({median_ae_percent:.2f}%)")
+                msg = (f"{name} - Validation RMSE: {rmse:.2f}, "
+                       f"Validation MAPE: {mape:.2f}%")
                 print(msg)
 
         # Plot the error distribution for the validation set
